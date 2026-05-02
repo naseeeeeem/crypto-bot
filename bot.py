@@ -101,7 +101,6 @@ def main():
     print("Bot started...")
 
     # TEST MESSAGE
-    send("🔥 BOT STARTED 🔥")
 
     symbols = get_symbols()
     print("Symbols:", len(symbols))
