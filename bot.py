@@ -226,7 +226,7 @@ def pump(a):
 def early_pump(a):
     strength = strength_label(a)
 
-    return f"""👀🚀 <b>اكتشاف ضخ مبكر</b>
+    return f"""👀🚀 <b>احتمال بامب</b>
 <b>{a['pair']}</b> على Gate.io
 
 💰 السعر: <b>${a['price']:.6f}</b>
