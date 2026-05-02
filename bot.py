@@ -281,6 +281,7 @@ def process_symbol(symbol):
         return None
 
 symbols = get_usdt_symbols()
+send("🚀 TEST FROM RAILWAY")
 print(f"Loaded {len(symbols)} symbols")
 
 while True:
