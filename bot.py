@@ -1,3 +1,4 @@
+print("🔥 NEW VERSION LOADED 🔥")
 import requests
 import time
 import os
