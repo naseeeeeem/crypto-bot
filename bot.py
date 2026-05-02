@@ -26,10 +26,9 @@ MAX_VOLUME_SPIKE_PERCENT = 1000
 
 last_alerts = {}
 
-# ================= SEND =================
 def send(msg, symbol=None):
     if not BOT_TOKEN or not CHAT_ID:
-        print("❌ Missing BOT_TOKEN or CHAT_ID")
+        print("Missing BOT_TOKEN or CHAT_ID")
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -53,7 +52,6 @@ def send(msg, symbol=None):
     except Exception as e:
         print("Telegram error:", e)
 
-# ================= HELPERS =================
 def is_bad_symbol(symbol):
     bad = ["3S", "3L", "5S", "5L", "BEAR", "BULL", "DOWN", "UP"]
     return any(x in symbol for x in bad)
@@ -61,10 +59,9 @@ def is_bad_symbol(symbol):
 def fmt(symbol):
     return symbol.replace("_", "/")
 
-def direction_icon(v):
-    return "🟢" if v >= 0 else "🔴"
+def direction_icon(value):
+    return "🟢" if value >= 0 else "🔴"
 
-# ================= SIGNAL (ARABIC) =================
 def strength_label(a):
     if a["p30"] >= 100:
         return "🔥 قوي"
@@ -72,7 +69,6 @@ def strength_label(a):
         return "🟡 متوسط"
     return "⚪ ضعيف"
 
-# ================= DATA =================
 def get_usdt_symbols():
     url = f"{BASE_URL}/spot/tickers"
     data = requests.get(url, timeout=20).json()
@@ -89,10 +85,13 @@ def get_usdt_symbols():
 
 def get_klines(symbol):
     url = f"{BASE_URL}/spot/candlesticks"
-    params = {"currency_pair": symbol, "interval": "1m", "limit": 120}
+    params = {
+        "currency_pair": symbol,
+        "interval": "1m",
+        "limit": 120
+    }
     return requests.get(url, params=params, timeout=15).json()
 
-# ================= LOGIC =================
 def can_alert(symbol, alert_type):
     key = f"{symbol}_{alert_type}"
     now = time.time()
@@ -108,7 +107,11 @@ def can_alert(symbol, alert_type):
     return False
 
 def analyze(symbol):
+    if is_bad_symbol(symbol):
+        return None
+
     data = get_klines(symbol)
+
     if not isinstance(data, list) or len(data) < 120:
         return None
 
@@ -117,92 +120,216 @@ def analyze(symbol):
     vol30 = sum(float(x[1]) for x in data[-30:])
     prev30 = sum(float(x[1]) for x in data[-60:-30])
 
-    if vol30 <= 0 or prev30 <= 0:
+    vol60 = sum(float(x[1]) for x in data[-60:])
+    prev60 = sum(float(x[1]) for x in data[-120:-60])
+
+    if vol30 <= 0 or prev30 <= 0 or vol60 <= 0 or prev60 <= 0:
         return None
 
     if vol30 < MIN_VOLUME_30M_USDT:
         return None
 
     p30 = ((vol30 - prev30) / prev30) * 100
+    p60 = ((vol60 - prev60) / prev60) * 100
 
-    if p30 > MAX_VOLUME_SPIKE_PERCENT:
+    if p30 > MAX_VOLUME_SPIKE_PERCENT or p60 > MAX_VOLUME_SPIKE_PERCENT:
         return None
 
     price = float(data[-1][2])
     price_10 = float(data[-10][2])
     price_30 = float(data[-30][2])
 
+    if price <= 0 or price_10 <= 0 or price_30 <= 0:
+        return None
+
     price_change_10m = ((price - price_10) / price_10) * 100
     price_change_30m = ((price - price_30) / price_30) * 100
+
+    volume_score = p30 * 0.5
+    price_score = price_change_10m * 25
+    liquidity_score = min(vol30 / 10000, 50)
+
+    early_bonus = 25 if (
+        p30 >= 90
+        and -0.2 <= price_change_10m <= 1
+        and price_change_30m >= -0.5
+        and vol30 >= 50000
+    ) else 0
+
+    score = volume_score + price_score + liquidity_score + early_bonus
 
     return {
         "symbol": symbol,
         "pair": fmt(symbol),
-        "price": price,
         "vol30": vol30,
+        "vol60": vol60,
         "p30": p30,
+        "p60": p60,
+        "price": price,
         "price_change_10m": price_change_10m,
         "price_change_30m": price_change_30m,
-        "score": p30 + price_change_10m * 20
+        "vol_diff30": vol30 - prev30,
+        "vol_diff60": vol60 - prev60,
+        "score": score
     }
 
-# ================= MESSAGES =================
-def build_msg(a):
+def msg30(a):
     icon = direction_icon(a["price_change_30m"])
     strength = strength_label(a)
 
-    return f"""📊 <b>{a['pair']}</b>
+    return f"""📊 <b>مراقبة الفوليوم [30 دقيقة]</b>
+<b>{a['pair']}</b> على Gate.io
 
 💰 السعر: <b>${a['price']:.6f}</b>
-{icon} 30m: <b>{a['price_change_30m']:.2f}%</b>
+{icon} التغير 30د: <b>{a['price_change_30m']:.2f}%</b>
 
-📊 حجم التداول: <b>{a['vol30']:,.0f}</b>
-🚀 الفوليوم: <b>{a['p30']:.2f}%</b>
+📊 الفوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
+🚀 ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
+⬆️ الزيادة: <b>{a['vol_diff30']:,.0f} USDT</b>
 
-⭐ الإشارة: <b>{strength}</b>"""
+⭐ قوة الإشارة: <b>{strength}</b>"""
 
-# ================= MAIN =================
+def msg60(a):
+    icon = direction_icon(a["price_change_30m"])
+    strength = strength_label(a)
+
+    return f"""📊 <b>مراقبة الفوليوم [60 دقيقة]</b>
+<b>{a['pair']}</b> على Gate.io
+
+💰 السعر: <b>${a['price']:.6f}</b>
+{icon} التغير 30د: <b>{a['price_change_30m']:.2f}%</b>
+
+📊 الفوليوم 60د: <b>{a['vol60']:,.0f} USDT</b>
+🚀 ارتفاع الفوليوم: <b>{a['p60']:.2f}%</b>
+⬆️ الزيادة: <b>{a['vol_diff60']:,.0f} USDT</b>
+
+⭐ قوة الإشارة: <b>{strength}</b>"""
+
+def pump(a):
+    strength = strength_label(a)
+
+    return f"""🔥🚀 <b>تنبيه ضخ قوي</b>
+<b>{a['pair']}</b> على Gate.io
+
+💰 السعر: <b>${a['price']:.6f}</b>
+
+🟢 10د: <b>{a['price_change_10m']:.2f}%</b>
+📈 30د: <b>{a['price_change_30m']:.2f}%</b>
+
+📊 الفوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
+⚡ ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
+⬆️ الزيادة: <b>{a['vol_diff30']:,.0f} USDT</b>
+
+⭐ قوة الإشارة: <b>{strength}</b>"""
+
+def early_pump(a):
+    strength = strength_label(a)
+
+    return f"""👀🚀 <b>اكتشاف ضخ مبكر</b>
+<b>{a['pair']}</b> على Gate.io
+
+💰 السعر: <b>${a['price']:.6f}</b>
+
+🟢 10د: <b>{a['price_change_10m']:.2f}%</b>
+📈 30د: <b>{a['price_change_30m']:.2f}%</b>
+
+📊 الفوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
+⚡ ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
+⬆️ الزيادة: <b>{a['vol_diff30']:,.0f} USDT</b>
+
+⭐ قوة الإشارة: <b>{strength}</b>"""
+
+def get_alert_type(a):
+    if (
+        a["price_change_10m"] >= PUMP_PRICE_PERCENT
+        and a["p30"] >= PUMP_VOLUME_PERCENT
+        and a["vol_diff30"] > 0
+    ):
+        return "pump"
+
+    if (
+        a["p30"] >= 90
+        and -0.2 <= a["price_change_10m"] <= 1
+        and a["price_change_30m"] >= -0.5
+        and a["vol30"] >= 50000
+        and a["vol_diff30"] > 0
+    ):
+        return "early"
+
+    if a["p30"] >= VOLUME_30_ALERT_PERCENT and a["vol_diff30"] > 0:
+        return "v30"
+
+    if a["p60"] >= VOLUME_60_ALERT_PERCENT and a["vol_diff60"] > 0:
+        return "v60"
+
+    return None
+
 def process_symbol(symbol):
     try:
-        return analyze(symbol)
-    except:
+        a = analyze(symbol)
+        if not a:
+            return None
+
+        alert_type = get_alert_type(a)
+        if not alert_type:
+            return None
+
+        return (a["score"], alert_type, a)
+
+    except Exception as e:
+        print(f"Error with {symbol}: {e}")
         return None
 
-def main():
-    print("🚀 Bot Started")
+symbols = get_usdt_symbols()
+print(f"Loaded {len(symbols)} symbols")
 
-    symbols = get_usdt_symbols()
-    print("Symbols:", len(symbols))
+while True:
+    try:
+        print("Scanning...")
 
-    while True:
-        try:
-            print("Scanning...")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            results = list(executor.map(process_symbol, symbols))
 
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-                results = list(ex.map(process_symbol, symbols))
+        candidates = [r for r in results if r]
+        candidates.sort(key=lambda x: x[0], reverse=True)
 
-            signals = [r for r in results if r]
-            signals.sort(key=lambda x: x["score"], reverse=True)
+        print(f"Candidates: {len(candidates)}")
 
-            sent = 0
+        sent = 0
 
-            for s in signals:
-                if sent >= MAX_ALERTS_PER_CYCLE:
-                    break
+        for score, alert_type, a in candidates:
+            if sent >= MAX_ALERTS_PER_CYCLE:
+                break
 
-                if not can_alert(s["symbol"], "main"):
-                    continue
+            s = a["symbol"]
 
-                send(build_msg(s), s["symbol"])
-                sent += 1
-                time.sleep(1)
+            if not can_alert(s, alert_type):
+                continue
 
-            print("Sent:", sent)
-            time.sleep(CHECK_EVERY_SECONDS)
+            print(
+                f"Sending {s} | Type: {alert_type} | Score: {score:.2f} | "
+                f"30m: {a['p30']:.2f}% | "
+                f"Price10m: {a['price_change_10m']:.2f}%"
+            )
 
-        except Exception as e:
-            print("Error:", e)
-            time.sleep(10)
+            if alert_type == "pump":
+                send(pump(a), s)
 
-if __name__ == "__main__":
-    main()
+            elif alert_type == "early":
+                send(early_pump(a), s)
+
+            elif alert_type == "v30":
+                send(msg30(a), s)
+
+            elif alert_type == "v60":
+                send(msg60(a), s)
+
+            sent += 1
+            time.sleep(1)
+
+        print(f"Cycle done | Sent: {sent}\n")
+        time.sleep(CHECK_EVERY_SECONDS)
+
+    except Exception as e:
+        print("Main Error:", e)
+        time.sleep(10)
