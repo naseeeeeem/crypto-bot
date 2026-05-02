@@ -1,10 +1,9 @@
 import requests
 import time
-import os
 from concurrent.futures import ThreadPoolExecutor
 
-BOT_TOKEN = os.getenv("8763101324:AAF5JGbRp2x9kkFFZM8_uvPSgROMDx7GhCc")
-CHAT_ID = os.getenv("-1003791131305")
+BOT_TOKEN = "8763101324:AAF5JGbRp2x9kkFFZM8_uvPSgROMDx7GhCc"
+CHAT_ID = "-1003791131305"
 
 BASE_URL = "https://api.gateio.ws/api/v4"
 
@@ -44,7 +43,7 @@ def send(msg, symbol=None):
 
     try:
         r = requests.post(url, json=data, timeout=15)
-        print("Telegram:", r.status_code, r.text)
+        print("Telegram:", r.status_code)
     except Exception as e:
         print("Telegram error:", e)
 
@@ -57,7 +56,6 @@ def get_usdt_symbols():
     data = requests.get(url, timeout=20).json()
 
     symbols = []
-
     for item in data:
         pair = item.get("currency_pair", "")
         vol = float(item.get("quote_volume", 0) or 0)
@@ -180,7 +178,7 @@ def msg30(a):
     strength = strength_label(a)
 
     return f"""📊 <b>Volume Monitor [30min]</b>
-<b>{a['pair']}</b> on Gate.io
+<b>{a['pair']}</b>
 
 💰 Price: <b>${a['price']:.6f}</b>
 {icon} Change 30m: <b>{a['price_change_30m']:.2f}%</b>
@@ -196,7 +194,7 @@ def msg60(a):
     strength = strength_label(a)
 
     return f"""📊 <b>Volume Monitor [60min]</b>
-<b>{a['pair']}</b> on Gate.io
+<b>{a['pair']}</b>
 
 💰 Price: <b>${a['price']:.6f}</b>
 {icon} Change 30m: <b>{a['price_change_30m']:.2f}%</b>
@@ -211,7 +209,7 @@ def pump(a):
     strength = strength_label(a)
 
     return f"""🔥🚀 <b>PUMP ALERT</b>
-<b>{a['pair']}</b> on Gate.io
+<b>{a['pair']}</b>
 
 💰 Price: <b>${a['price']:.6f}</b>
 
@@ -228,7 +226,7 @@ def early_pump(a):
     strength = strength_label(a)
 
     return f"""👀🚀 <b>EARLY PUMP DETECTION</b>
-<b>{a['pair']}</b> on Gate.io
+<b>{a['pair']}</b>
 
 💰 Price: <b>${a['price']:.6f}</b>
 
