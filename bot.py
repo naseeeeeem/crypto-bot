@@ -6,7 +6,7 @@ import os
 # CONFIG (من Railway)
 # ========================
 BOT_TOKEN = os.getenv("8763101324:AAF5JGbRp2x9kkFFZM8_uvPSgROMDx7GhCc")
-CHAT_ID = os.getenv("1003791131305")
+CHAT_ID = os.getenv("-1003791131305")
 
 BASE_URL = "https://api.gateio.ws/api/v4"
 INTERVAL = 30  # seconds
@@ -17,7 +17,7 @@ INTERVAL = 30  # seconds
 def send(text):
     url = f"https://api.telegram.org/bot8763101324:AAF5JGbRp2x9kkFFZM8_uvPSgROMDx7GhCc/sendMessage"
     data = {
-        "chat_id": CHAT_ID,
+        "chat_id": -1003791131305,
         "text": text
     }
 
