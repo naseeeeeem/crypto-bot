@@ -532,10 +532,11 @@ def check_report_command():
 
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+
         params = {
             "offset": last_update_id + 1,
-            "timeout": 1,
-            "allowed_updates": ["message", "channel_post"]
+            "timeout": 0,
+            "allowed_updates": ["message"]
         }
 
         res = requests.get(url, params=params, timeout=5)
@@ -548,19 +549,29 @@ def check_report_command():
         for update in data.get("result", []):
             last_update_id = update.get("update_id", last_update_id)
 
-            msg = update.get("message") or update.get("channel_post")
+            msg = update.get("message")
             if not msg:
                 continue
 
             text = msg.get("text", "").strip()
+            chat_id = msg["chat"]["id"]
+
             print("Command received:", text)
 
-            if text.startswith("/report"):
+            if text == "/report" or text.startswith("/report@"):
+                print("REPORT REQUEST RECEIVED")
+
                 report = build_report()
-                send(report, chat_id=REPORT_CHAT_ID or msg["chat"]["id"])
+
+                # إرسال التقرير إلى قناة التقارير
+                if REPORT_CHAT_ID:
+                    send(report, chat_id=REPORT_CHAT_ID)
+
+                # إرسال نسخة لك في محادثة البوت أيضًا
+                send(report, chat_id=chat_id)
 
     except Exception as e:
-        print("check_report_command error:", e)
+        print("Report command error:", e)
 
 
 def vip_message(a, title):
