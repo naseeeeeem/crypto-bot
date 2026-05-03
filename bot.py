@@ -1,97 +1,99 @@
-print("🔥 NEW VERSION LOADED 🔥")
-import requests
-import time
 import os
+import time
+import requests
 from concurrent.futures import ThreadPoolExecutor
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")              # قناة التنبيهات / المراقبة
+TRADE_CHAT_ID = os.getenv("TRADE_CHAT_ID")  # قناة التوصيات VIP
 
-BASE_URL = "https://api.gateio.ws/api/v4"
+GATE_BASE = "https://api.gateio.ws/api/v4"
 
-CHECK_EVERY_SECONDS = 5
+CHECK_EVERY_SECONDS = 10
 MAX_WORKERS = 10
-ALERT_COOLDOWN_SECONDS = 30 * 60
 MAX_ALERTS_PER_CYCLE = 5
+ALERT_COOLDOWN_SECONDS = 45 * 60
 
-MIN_24H_VOLUME_USDT = 500000
-MIN_VOLUME_30M_USDT = 30000
+MIN_24H_VOLUME_USDT = 700000
+MIN_VOLUME_30M_USDT = 40000
 
-VOLUME_30_ALERT_PERCENT = 50
-VOLUME_60_ALERT_PERCENT = 80
+SUPPORT_LOOKBACK = 30
 
-PUMP_PRICE_PERCENT = 1
-PUMP_VOLUME_PERCENT = 40
+WATCH_VOLUME_PERCENT = 55
+EARLY_VOLUME_PERCENT = 80
+VIP_VOLUME_PERCENT = 110
 
-MAX_VOLUME_SPIKE_PERCENT = 1000
+MAX_ENTRY_DISTANCE_PERCENT = 1.8
+MAX_WATCH_DISTANCE_PERCENT = 3.5
+
+MAX_DUMP_10M_PERCENT = -3.5
+MAX_PUMP_10M_PERCENT = 8
+MAX_PRICE_30M_PERCENT = 15
+
+FAKE_PUMP_VOLUME_PERCENT = 160
+FAKE_PUMP_MAX_PRICE_MOVE = 0.25
+
+WHALE_VOLUME_DIFF_USDT = 70000
+
+VIP_SCORE = 130
+GOLD_SCORE = 160
 
 last_alerts = {}
 
-def send(msg, symbol=None):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Missing BOT_TOKEN or CHAT_ID")
+
+def send(msg, symbol=None, chat_id=None):
+    if not msg or not msg.strip():
+        print("Empty message skipped")
+        return
+
+    if not BOT_TOKEN:
+        print("Missing BOT_TOKEN")
+        return
+
+    target = chat_id if chat_id else CHAT_ID
+
+    if not target:
+        print("Missing CHAT_ID")
         return
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     data = {
-        "chat_id": str(CHAT_ID),
+        "chat_id": str(target),
         "text": msg,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
 
     if symbol:
-        chart_url = f"https://www.gate.io/trade/{symbol}"
         data["reply_markup"] = {
-            "inline_keyboard": [[{"text": "📈 عرض الشارت", "url": chart_url}]]
+            "inline_keyboard": [[
+                {"text": "📈 عرض الشارت", "url": f"https://www.gate.io/trade/{symbol}"}
+            ]]
         }
 
     try:
         r = requests.post(url, json=data, timeout=15)
-        print("Telegram:", r.status_code, r.text)
+        print("Telegram:", r.status_code, r.text[:150])
     except Exception as e:
         print("Telegram error:", e)
+
+
+def safe_float(x):
+    try:
+        return float(x)
+    except:
+        return 0
+
+
+def fmt(symbol):
+    return symbol.replace("_", "/")
+
 
 def is_bad_symbol(symbol):
     bad = ["3S", "3L", "5S", "5L", "BEAR", "BULL", "DOWN", "UP"]
     return any(x in symbol for x in bad)
 
-def fmt(symbol):
-    return symbol.replace("_", "/")
-
-def direction_icon(value):
-    return "🟢" if value >= 0 else "🔴"
-
-def strength_label(a):
-    if a["p30"] >= 100:
-        return "🔥 قوي"
-    elif a["p30"] >= 60:
-        return "🟡 متوسط"
-    return "⚪ ضعيف"
-
-def get_usdt_symbols():
-    url = f"{BASE_URL}/spot/tickers"
-    data = requests.get(url, timeout=20).json()
-
-    symbols = []
-    for item in data:
-        pair = item.get("currency_pair", "")
-        vol = float(item.get("quote_volume", 0) or 0)
-
-        if pair.endswith("_USDT") and not is_bad_symbol(pair) and vol >= MIN_24H_VOLUME_USDT:
-            symbols.append(pair)
-
-    return symbols
-
-def get_klines(symbol):
-    url = f"{BASE_URL}/spot/candlesticks"
-    params = {
-        "currency_pair": symbol,
-        "interval": "1m",
-        "limit": 120
-    }
-    return requests.get(url, params=params, timeout=15).json()
 
 def can_alert(symbol, alert_type):
     key = f"{symbol}_{alert_type}"
@@ -107,6 +109,122 @@ def can_alert(symbol, alert_type):
 
     return False
 
+
+def get_symbols():
+    try:
+        data = requests.get(f"{GATE_BASE}/spot/tickers", timeout=20).json()
+    except Exception as e:
+        print("get_symbols error:", e)
+        return []
+
+    symbols = []
+
+    for item in data:
+        pair = item.get("currency_pair", "")
+        vol = safe_float(item.get("quote_volume", 0))
+
+        if pair.endswith("_USDT") and not is_bad_symbol(pair) and vol >= MIN_24H_VOLUME_USDT:
+            symbols.append(pair)
+
+    return symbols
+
+
+def get_klines(symbol):
+    params = {
+        "currency_pair": symbol,
+        "interval": "1m",
+        "limit": 120
+    }
+
+    try:
+        return requests.get(
+            f"{GATE_BASE}/spot/candlesticks",
+            params=params,
+            timeout=15
+        ).json()
+    except Exception as e:
+        print(f"get_klines error {symbol}:", e)
+        return []
+
+
+def calculate_support_30m(data):
+    lows = []
+
+    for candle in data[-SUPPORT_LOOKBACK:]:
+        low = safe_float(candle[4])
+        if low > 0:
+            lows.append(low)
+
+    return min(lows) if lows else None
+
+
+def calculate_resistance_30m(data):
+    highs = []
+
+    for candle in data[-SUPPORT_LOOKBACK:]:
+        high = safe_float(candle[3])
+        if high > 0:
+            highs.append(high)
+
+    return max(highs) if highs else None
+
+
+def whale_text(a):
+    if a["vol_diff30"] >= WHALE_VOLUME_DIFF_USDT:
+        return "🐋 <b>Whale Activity Detected</b>"
+    return ""
+
+
+def vip_label(a):
+    if a["score"] >= GOLD_SCORE:
+        return "💎 GOLD VIP"
+    if a["score"] >= VIP_SCORE:
+        return "🔥 VIP"
+    if a["score"] >= 100:
+        return "🟡 جيد"
+    return "⚪ مراقبة"
+
+
+def trade_plan(a):
+    price = a["price"]
+    entry = a["support_30m"] if a["support_30m"] else price
+
+    stop_loss = entry * 0.985
+
+    if a["score"] >= GOLD_SCORE:
+        target1 = entry * 1.03
+        target2 = entry * 1.06
+    elif a["score"] >= VIP_SCORE:
+        target1 = entry * 1.025
+        target2 = entry * 1.05
+    else:
+        target1 = entry * 1.02
+        target2 = entry * 1.04
+
+    distance = ((price - entry) / entry) * 100 if entry > 0 else 0
+
+    risk = entry - stop_loss
+    reward = target1 - entry
+    rr = reward / risk if risk > 0 else 0
+
+    if distance <= 0.6:
+        status = "✅ دخول ممتاز — السعر قريب من الدعم"
+    elif distance <= MAX_ENTRY_DISTANCE_PERCENT:
+        status = "🟡 دخول مقبول — الأفضل انتظار نزول بسيط"
+    else:
+        status = "🚫 السعر بعيد — لا تدخل ماركت"
+
+    return {
+        "entry": entry,
+        "stop_loss": stop_loss,
+        "target1": target1,
+        "target2": target2,
+        "distance": distance,
+        "rr": rr,
+        "status": status
+    }
+
+
 def analyze(symbol):
     if is_bad_symbol(symbol):
         return None
@@ -116,13 +234,16 @@ def analyze(symbol):
     if not isinstance(data, list) or len(data) < 120:
         return None
 
-    data = sorted(data, key=lambda x: int(x[0]))
+    try:
+        data = sorted(data, key=lambda x: int(x[0]))
+    except:
+        return None
 
-    vol30 = sum(float(x[1]) for x in data[-30:])
-    prev30 = sum(float(x[1]) for x in data[-60:-30])
+    vol30 = sum(safe_float(x[1]) for x in data[-30:])
+    prev30 = sum(safe_float(x[1]) for x in data[-60:-30])
 
-    vol60 = sum(float(x[1]) for x in data[-60:])
-    prev60 = sum(float(x[1]) for x in data[-120:-60])
+    vol60 = sum(safe_float(x[1]) for x in data[-60:])
+    prev60 = sum(safe_float(x[1]) for x in data[-120:-60])
 
     if vol30 <= 0 or prev30 <= 0 or vol60 <= 0 or prev60 <= 0:
         return None
@@ -133,137 +254,188 @@ def analyze(symbol):
     p30 = ((vol30 - prev30) / prev30) * 100
     p60 = ((vol60 - prev60) / prev60) * 100
 
-    if p30 > MAX_VOLUME_SPIKE_PERCENT or p60 > MAX_VOLUME_SPIKE_PERCENT:
-        return None
-
-    price = float(data[-1][2])
-    price_10 = float(data[-10][2])
-    price_30 = float(data[-30][2])
+    price = safe_float(data[-1][2])
+    price_10 = safe_float(data[-10][2])
+    price_30 = safe_float(data[-30][2])
 
     if price <= 0 or price_10 <= 0 or price_30 <= 0:
         return None
 
-    price_change_10m = ((price - price_10) / price_10) * 100
-    price_change_30m = ((price - price_30) / price_30) * 100
+    change10 = ((price - price_10) / price_10) * 100
+    change30 = ((price - price_30) / price_30) * 100
 
-    volume_score = p30 * 0.5
-    price_score = price_change_10m * 25
-    liquidity_score = min(vol30 / 10000, 50)
+    support = calculate_support_30m(data)
+    resistance = calculate_resistance_30m(data)
 
-    early_bonus = 25 if (
-        p30 >= 90
-        and -0.2 <= price_change_10m <= 1
-        and price_change_30m >= -0.5
-        and vol30 >= 50000
-    ) else 0
+    if not support:
+        return None
 
-    score = volume_score + price_score + liquidity_score + early_bonus
+    distance = ((price - support) / support) * 100 if support > 0 else 999
+
+    # فلاتر حماية
+    if change10 <= MAX_DUMP_10M_PERCENT:
+        return None
+
+    if change10 >= MAX_PUMP_10M_PERCENT:
+        return None
+
+    if change30 >= MAX_PRICE_30M_PERCENT:
+        return None
+
+    # Fake Pump Filter
+    if p30 >= FAKE_PUMP_VOLUME_PERCENT and abs(change10) <= FAKE_PUMP_MAX_PRICE_MOVE:
+        return None
+
+    # لا نريد عملات بعيدة جدًا عن الدعم
+    if distance > MAX_WATCH_DISTANCE_PERCENT:
+        return None
+
+    volume_score = p30 * 0.55
+    price_score = change10 * 28
+    liquidity_score = min(vol30 / 10000, 65)
+    support_score = max(0, 45 - (distance * 18))
+    whale_bonus = 30 if (vol30 - prev30) >= WHALE_VOLUME_DIFF_USDT else 0
+
+    early_bonus = 0
+    if (
+        p30 >= EARLY_VOLUME_PERCENT
+        and -0.2 <= change10 <= 1.2
+        and change30 >= -0.7
+        and distance <= 2.2
+    ):
+        early_bonus = 35
+
+    score = volume_score + price_score + liquidity_score + support_score + whale_bonus + early_bonus
 
     return {
         "symbol": symbol,
         "pair": fmt(symbol),
+        "price": price,
         "vol30": vol30,
         "vol60": vol60,
         "p30": p30,
         "p60": p60,
-        "price": price,
-        "price_change_10m": price_change_10m,
-        "price_change_30m": price_change_30m,
         "vol_diff30": vol30 - prev30,
         "vol_diff60": vol60 - prev60,
+        "price_change_10m": change10,
+        "price_change_30m": change30,
+        "support_30m": support,
+        "resistance_30m": resistance,
+        "distance_from_support": distance,
         "score": score
     }
 
-def msg30(a):
-    icon = direction_icon(a["price_change_30m"])
-    strength = strength_label(a)
 
-    return f"""📊 <b>مراقبة الفوليوم [30 دقيقة]</b>
+def get_alert_type(a):
+    plan = trade_plan(a)
+
+    # GOLD VIP
+    if (
+        a["score"] >= GOLD_SCORE
+        and a["p30"] >= VIP_VOLUME_PERCENT
+        and a["price_change_10m"] >= 0.4
+        and plan["distance"] <= MAX_ENTRY_DISTANCE_PERCENT
+    ):
+        return "gold_vip"
+
+    # VIP
+    if (
+        a["score"] >= VIP_SCORE
+        and a["p30"] >= VIP_VOLUME_PERCENT
+        and a["price_change_10m"] >= 0.35
+        and plan["distance"] <= MAX_ENTRY_DISTANCE_PERCENT
+    ):
+        return "vip_trade"
+
+    # Early VIP
+    if (
+        a["p30"] >= EARLY_VOLUME_PERCENT
+        and -0.2 <= a["price_change_10m"] <= 1.2
+        and a["price_change_30m"] >= -0.7
+        and plan["distance"] <= 2.2
+        and a["score"] >= 100
+    ):
+        return "early_vip"
+
+    # مراقبة فقط
+    if (
+        a["p30"] >= WATCH_VOLUME_PERCENT
+        and a["vol_diff30"] > 0
+        and a["score"] >= 80
+    ):
+        return "watch"
+
+    return None
+
+
+def vip_message(a, title):
+    plan = trade_plan(a)
+    whale = whale_text(a)
+    label = vip_label(a)
+
+    return f"""{title}
+<b>{a['pair']}</b> على Gate.io
+
+🏷️ التصنيف: <b>{label}</b>
+💰 السعر الحالي: <b>${a['price']:.6f}</b>
+📌 دعم 30د: <b>${a['support_30m']:.6f}</b>
+📍 بُعد السعر عن الدعم: <b>{plan['distance']:.2f}%</b>
+
+🟢 تغير 10د: <b>{a['price_change_10m']:.2f}%</b>
+📈 تغير 30د: <b>{a['price_change_30m']:.2f}%</b>
+
+📊 فوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
+🚀 ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
+⬆️ زيادة الفوليوم: <b>{a['vol_diff30']:,.0f} USDT</b>
+
+{whale}
+
+🧠 VIP Smart Score: <b>{a['score']:.2f}</b>
+
+🎯 <b>خطة VIP</b>
+🟢 Entry: <b>${plan['entry']:.6f}</b>
+🛑 Stop Loss: <b>${plan['stop_loss']:.6f}</b>
+🎯 Target 1: <b>${plan['target1']:.6f}</b>
+🚀 Target 2: <b>${plan['target2']:.6f}</b>
+⚖️ R/R: <b>{plan['rr']:.2f}</b>
+
+{plan['status']}
+
+⚠️ ليست توصية شراء مباشرة. لا تدخل إذا السعر بعيد عن الدخول."""
+
+
+def early_message(a):
+    return vip_message(a, "👀🚀 <b>Early VIP Signal</b>")
+
+
+def watch_message(a):
+    plan = trade_plan(a)
+    whale = whale_text(a)
+
+    return f"""📊 <b>VIP Watchlist</b>
 <b>{a['pair']}</b> على Gate.io
 
 💰 السعر: <b>${a['price']:.6f}</b>
-{icon} التغير 30د: <b>{a['price_change_30m']:.2f}%</b>
+📌 دعم 30د: <b>${a['support_30m']:.6f}</b>
+📍 البعد عن الدعم: <b>{plan['distance']:.2f}%</b>
 
-📊 الفوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
+🟢 تغير 10د: <b>{a['price_change_10m']:.2f}%</b>
+📈 تغير 30د: <b>{a['price_change_30m']:.2f}%</b>
+
+📊 فوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
 🚀 ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
 ⬆️ الزيادة: <b>{a['vol_diff30']:,.0f} USDT</b>
 
-⭐ قوة الإشارة: <b>{strength}</b>"""
+{whale}
 
-def msg60(a):
-    icon = direction_icon(a["price_change_30m"])
-    strength = strength_label(a)
+🧠 Score: <b>{a['score']:.2f}</b>
 
-    return f"""📊 <b>مراقبة الفوليوم [60 دقيقة]</b>
-<b>{a['pair']}</b> على Gate.io
+👀 <b>منطقة مراقبة</b>
+🟢 دخول أفضل قرب: <b>${plan['entry']:.6f}</b>
+{plan['status']}
 
-💰 السعر: <b>${a['price']:.6f}</b>
-{icon} التغير 30د: <b>{a['price_change_30m']:.2f}%</b>
+⚠️ مراقبة فقط — ليست توصية VIP بعد."""
 
-📊 الفوليوم 60د: <b>{a['vol60']:,.0f} USDT</b>
-🚀 ارتفاع الفوليوم: <b>{a['p60']:.2f}%</b>
-⬆️ الزيادة: <b>{a['vol_diff60']:,.0f} USDT</b>
-
-⭐ قوة الإشارة: <b>{strength}</b>"""
-
-def pump(a):
-    strength = strength_label(a)
-
-    return f"""🔥🚀 <b>تنبيه ضخ قوي</b>
-<b>{a['pair']}</b> على Gate.io
-
-💰 السعر: <b>${a['price']:.6f}</b>
-
-🟢 10د: <b>{a['price_change_10m']:.2f}%</b>
-📈 30د: <b>{a['price_change_30m']:.2f}%</b>
-
-📊 الفوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
-⚡ ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
-⬆️ الزيادة: <b>{a['vol_diff30']:,.0f} USDT</b>
-
-⭐ قوة الإشارة: <b>{strength}</b>"""
-
-def early_pump(a):
-    strength = strength_label(a)
-
-    return f"""👀🚀 <b>احتمال بامب</b>
-<b>{a['pair']}</b> على Gate.io
-
-💰 السعر: <b>${a['price']:.6f}</b>
-
-🟢 10د: <b>{a['price_change_10m']:.2f}%</b>
-📈 30د: <b>{a['price_change_30m']:.2f}%</b>
-
-📊 الفوليوم 30د: <b>{a['vol30']:,.0f} USDT</b>
-⚡ ارتفاع الفوليوم: <b>{a['p30']:.2f}%</b>
-⬆️ الزيادة: <b>{a['vol_diff30']:,.0f} USDT</b>
-
-⭐ قوة الإشارة: <b>{strength}</b>"""
-
-def get_alert_type(a):
-    if (
-        a["price_change_10m"] >= PUMP_PRICE_PERCENT
-        and a["p30"] >= PUMP_VOLUME_PERCENT
-        and a["vol_diff30"] > 0
-    ):
-        return "pump"
-
-    if (
-        a["p30"] >= 90
-        and -0.2 <= a["price_change_10m"] <= 1
-        and a["price_change_30m"] >= -0.5
-        and a["vol30"] >= 50000
-        and a["vol_diff30"] > 0
-    ):
-        return "early"
-
-    if a["p30"] >= VOLUME_30_ALERT_PERCENT and a["vol_diff30"] > 0:
-        return "v30"
-
-    if a["p60"] >= VOLUME_60_ALERT_PERCENT and a["vol_diff60"] > 0:
-        return "v60"
-
-    return None
 
 def process_symbol(symbol):
     try:
@@ -278,11 +450,13 @@ def process_symbol(symbol):
         return (a["score"], alert_type, a)
 
     except Exception as e:
-        print(f"Error with {symbol}: {e}")
+        print(f"Error with {symbol}:", e)
         return None
 
-symbols = get_usdt_symbols()
-print(f"Loaded {len(symbols)} symbols")
+
+symbols = get_symbols()
+print(f"Loaded Gate symbols: {len(symbols)}")
+print("VIP BOT RUNNING ✅")
 
 while True:
     try:
@@ -302,28 +476,27 @@ while True:
             if sent >= MAX_ALERTS_PER_CYCLE:
                 break
 
-            s = a["symbol"]
+            symbol = a["symbol"]
 
-            if not can_alert(s, alert_type):
+            if not can_alert(symbol, alert_type):
                 continue
 
             print(
-                f"Sending {s} | Type: {alert_type} | Score: {score:.2f} | "
-                f"30m: {a['p30']:.2f}% | "
-                f"Price10m: {a['price_change_10m']:.2f}%"
+                f"Sending {symbol} | {alert_type} | "
+                f"Score: {score:.2f} | p30: {a['p30']:.2f}%"
             )
 
-            if alert_type == "pump":
-                send(pump(a), s)
+            if alert_type == "gold_vip":
+                send(vip_message(a, "💎🔥 <b>GOLD VIP TRADE</b>"), symbol, TRADE_CHAT_ID)
 
-            elif alert_type == "early":
-                send(early_pump(a), s)
+            elif alert_type == "vip_trade":
+                send(vip_message(a, "🔥 <b>VIP TRADE</b>"), symbol, TRADE_CHAT_ID)
 
-            elif alert_type == "v30":
-                send(msg30(a), s)
+            elif alert_type == "early_vip":
+                send(early_message(a), symbol, TRADE_CHAT_ID)
 
-            elif alert_type == "v60":
-                send(msg60(a), s)
+            elif alert_type == "watch":
+                send(watch_message(a), symbol, CHAT_ID)
 
             sent += 1
             time.sleep(1)
