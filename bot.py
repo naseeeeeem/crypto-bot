@@ -1,13 +1,16 @@
 import os
 import time
+import json
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")              # قناة التنبيهات / المراقبة
-TRADE_CHAT_ID = os.getenv("TRADE_CHAT_ID")  # قناة التوصيات VIP
+CHAT_ID = os.getenv("CHAT_ID")
+TRADE_CHAT_ID = os.getenv("TRADE_CHAT_ID")
+REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID")
 
 GATE_BASE = "https://api.gateio.ws/api/v4"
+DATA_FILE = "trades_data.json"
 
 CHECK_EVERY_SECONDS = 10
 MAX_WORKERS = 10
@@ -39,6 +42,23 @@ VIP_SCORE = 130
 GOLD_SCORE = 160
 
 last_alerts = {}
+last_update_id = 0
+
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"active": [], "closed": []}
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"active": [], "closed": []}
+
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def send(msg, symbol=None, chat_id=None):
@@ -130,11 +150,7 @@ def get_symbols():
 
 
 def get_klines(symbol):
-    params = {
-        "currency_pair": symbol,
-        "interval": "1m",
-        "limit": 120
-    }
+    params = {"currency_pair": symbol, "interval": "1m", "limit": 120}
 
     try:
         return requests.get(
@@ -145,6 +161,22 @@ def get_klines(symbol):
     except Exception as e:
         print(f"get_klines error {symbol}:", e)
         return []
+
+
+def get_current_price(symbol):
+    try:
+        data = requests.get(
+            f"{GATE_BASE}/spot/tickers",
+            params={"currency_pair": symbol},
+            timeout=10
+        ).json()
+
+        if isinstance(data, list) and data:
+            return safe_float(data[0].get("last"))
+    except Exception as e:
+        print("get_current_price error:", e)
+
+    return 0
 
 
 def calculate_support_30m(data):
@@ -272,7 +304,6 @@ def analyze(symbol):
 
     distance = ((price - support) / support) * 100 if support > 0 else 999
 
-    # فلاتر حماية
     if change10 <= MAX_DUMP_10M_PERCENT:
         return None
 
@@ -282,11 +313,9 @@ def analyze(symbol):
     if change30 >= MAX_PRICE_30M_PERCENT:
         return None
 
-    # Fake Pump Filter
     if p30 >= FAKE_PUMP_VOLUME_PERCENT and abs(change10) <= FAKE_PUMP_MAX_PRICE_MOVE:
         return None
 
-    # لا نريد عملات بعيدة جدًا عن الدعم
     if distance > MAX_WATCH_DISTANCE_PERCENT:
         return None
 
@@ -329,7 +358,6 @@ def analyze(symbol):
 def get_alert_type(a):
     plan = trade_plan(a)
 
-    # GOLD VIP
     if (
         a["score"] >= GOLD_SCORE
         and a["p30"] >= VIP_VOLUME_PERCENT
@@ -338,7 +366,6 @@ def get_alert_type(a):
     ):
         return "gold_vip"
 
-    # VIP
     if (
         a["score"] >= VIP_SCORE
         and a["p30"] >= VIP_VOLUME_PERCENT
@@ -347,7 +374,6 @@ def get_alert_type(a):
     ):
         return "vip_trade"
 
-    # Early VIP
     if (
         a["p30"] >= EARLY_VOLUME_PERCENT
         and -0.2 <= a["price_change_10m"] <= 1.2
@@ -357,7 +383,6 @@ def get_alert_type(a):
     ):
         return "early_vip"
 
-    # مراقبة فقط
     if (
         a["p30"] >= WATCH_VOLUME_PERCENT
         and a["vol_diff30"] > 0
@@ -366,6 +391,168 @@ def get_alert_type(a):
         return "watch"
 
     return None
+
+
+def register_trade(a, alert_type):
+    if alert_type not in ["gold_vip", "vip_trade", "early_vip"]:
+        return
+
+    plan = trade_plan(a)
+    data = load_data()
+
+    trade_id = f"{a['symbol']}_{int(time.time())}"
+
+    trade = {
+        "id": trade_id,
+        "symbol": a["symbol"],
+        "pair": a["pair"],
+        "type": alert_type,
+        "entry": plan["entry"],
+        "stop_loss": plan["stop_loss"],
+        "target1": plan["target1"],
+        "target2": plan["target2"],
+        "score": a["score"],
+        "opened_at": int(time.time()),
+        "status": "active"
+    }
+
+    data["active"].append(trade)
+    save_data(data)
+
+
+def check_trades_results():
+    data = load_data()
+    active = data.get("active", [])
+    closed = data.get("closed", [])
+
+    still_active = []
+
+    for trade in active:
+        symbol = trade["symbol"]
+        price = get_current_price(symbol)
+
+        if price <= 0:
+            still_active.append(trade)
+            continue
+
+        if price >= trade["target1"]:
+            trade["status"] = "win"
+            trade["closed_at"] = int(time.time())
+            trade["closed_price"] = price
+            closed.append(trade)
+
+            send(
+                f"""✅ <b>صفقة وصلت Target 1</b>
+<b>{trade['pair']}</b>
+
+🎯 Target 1: <b>${trade['target1']:.6f}</b>
+💰 السعر الحالي: <b>${price:.6f}</b>
+🧠 Score: <b>{trade['score']:.2f}</b>""",
+                symbol,
+                REPORT_CHAT_ID or TRADE_CHAT_ID
+            )
+
+        elif price <= trade["stop_loss"]:
+            trade["status"] = "loss"
+            trade["closed_at"] = int(time.time())
+            trade["closed_price"] = price
+            closed.append(trade)
+
+            send(
+                f"""🛑 <b>صفقة ضربت Stop Loss</b>
+<b>{trade['pair']}</b>
+
+🛑 Stop: <b>${trade['stop_loss']:.6f}</b>
+💰 السعر الحالي: <b>${price:.6f}</b>
+🧠 Score: <b>{trade['score']:.2f}</b>""",
+                symbol,
+                REPORT_CHAT_ID or TRADE_CHAT_ID
+            )
+
+        else:
+            still_active.append(trade)
+
+    data["active"] = still_active
+    data["closed"] = closed
+    save_data(data)
+
+
+def build_report():
+    data = load_data()
+    closed = data.get("closed", [])
+    active = data.get("active", [])
+
+    total = len(closed)
+    wins = len([t for t in closed if t.get("status") == "win"])
+    losses = len([t for t in closed if t.get("status") == "loss"])
+    win_rate = (wins / total * 100) if total > 0 else 0
+
+    by_type = {}
+
+    for t in closed:
+        typ = t.get("type", "unknown")
+        if typ not in by_type:
+            by_type[typ] = {"total": 0, "wins": 0, "losses": 0}
+
+        by_type[typ]["total"] += 1
+
+        if t.get("status") == "win":
+            by_type[typ]["wins"] += 1
+        elif t.get("status") == "loss":
+            by_type[typ]["losses"] += 1
+
+    type_lines = ""
+
+    for typ, s in by_type.items():
+        wr = (s["wins"] / s["total"] * 100) if s["total"] > 0 else 0
+        type_lines += f"\n• {typ}: {s['wins']}/{s['total']} — <b>{wr:.1f}%</b>"
+
+    if not type_lines:
+        type_lines = "\nلا يوجد نتائج مغلقة بعد."
+
+    return f"""📊 <b>تقرير أداء البوت VIP</b>
+
+📌 الصفقات المغلقة: <b>{total}</b>
+✅ ناجحة: <b>{wins}</b>
+🛑 خاسرة: <b>{losses}</b>
+📈 Win Rate: <b>{win_rate:.1f}%</b>
+
+⏳ صفقات نشطة حاليًا: <b>{len(active)}</b>
+
+📂 <b>حسب نوع الإشارة:</b>{type_lines}
+
+🕒 التقرير يدوي عبر أمر /report"""
+
+
+def check_report_command():
+    global last_update_id
+
+    if not BOT_TOKEN:
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+        params = {"offset": last_update_id + 1, "timeout": 1}
+        data = requests.get(url, params=params, timeout=5).json()
+
+        if not data.get("ok"):
+            return
+
+        for update in data.get("result", []):
+            last_update_id = update.get("update_id", last_update_id)
+
+            msg = update.get("message") or update.get("channel_post")
+            if not msg:
+                continue
+
+            text = msg.get("text", "").strip()
+
+            if text.startswith("/report"):
+                report = build_report()
+                send(report, chat_id=REPORT_CHAT_ID or msg["chat"]["id"])
+
+    except Exception as e:
+        print("check_report_command error:", e)
 
 
 def vip_message(a, title):
@@ -401,7 +588,7 @@ def vip_message(a, title):
 
 {plan['status']}
 
-⚠️ ليست توصية شراء مباشرة. لا تدخل إذا السعر بعيد عن الدخول."""
+⚠️ ليست توصية شراء مباشرة."""
 
 
 def early_message(a):
@@ -456,10 +643,13 @@ def process_symbol(symbol):
 
 symbols = get_symbols()
 print(f"Loaded Gate symbols: {len(symbols)}")
-print("VIP BOT RUNNING ✅")
+print("VIP BOT + REPORT SYSTEM RUNNING ✅")
 
 while True:
     try:
+        check_report_command()
+        check_trades_results()
+
         print("Scanning...")
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -488,12 +678,15 @@ while True:
 
             if alert_type == "gold_vip":
                 send(vip_message(a, "💎🔥 <b>GOLD VIP TRADE</b>"), symbol, TRADE_CHAT_ID)
+                register_trade(a, alert_type)
 
             elif alert_type == "vip_trade":
                 send(vip_message(a, "🔥 <b>VIP TRADE</b>"), symbol, TRADE_CHAT_ID)
+                register_trade(a, alert_type)
 
             elif alert_type == "early_vip":
                 send(early_message(a), symbol, TRADE_CHAT_ID)
+                register_trade(a, alert_type)
 
             elif alert_type == "watch":
                 send(watch_message(a), symbol, CHAT_ID)
