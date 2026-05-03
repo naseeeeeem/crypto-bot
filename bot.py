@@ -532,10 +532,17 @@ def check_report_command():
 
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-        params = {"offset": last_update_id + 1, "timeout": 1}
-        data = requests.get(url, params=params, timeout=5).json()
+        params = {
+            "offset": last_update_id + 1,
+            "timeout": 1,
+            "allowed_updates": ["message", "channel_post"]
+        }
+
+        res = requests.get(url, params=params, timeout=5)
+        data = res.json()
 
         if not data.get("ok"):
+            print("getUpdates error:", data)
             return
 
         for update in data.get("result", []):
@@ -546,6 +553,7 @@ def check_report_command():
                 continue
 
             text = msg.get("text", "").strip()
+            print("Command received:", text)
 
             if text.startswith("/report"):
                 report = build_report()
