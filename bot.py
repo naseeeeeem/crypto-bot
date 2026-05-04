@@ -1423,7 +1423,7 @@ def vip_message(a, title):
 <b>{a['pair']}</b> على Gate.io
 
 🏷️ التصنيف: <b>{label}</b>
-📊 الجودة: <b>{quality}</b>
+📊 الخطورة: <b>{quality}</b>
 💰 السعر الحالي: <b>${a['price']:.6f}</b>
 
 🕓 <b>خطة 4 ساعات</b>
@@ -1466,7 +1466,7 @@ def watch_message(a):
     return f"""📊 <b>VIP Watchlist</b>
 <b>{a['pair']}</b> على Gate.io
 
-📊 الجودة: <b>{quality}</b>
+📊 الخطورة: <b>{quality}</b>
 💰 السعر الحالي: <b>${a['price']:.6f}</b>
 
 🕓 <b>خطة 4 ساعات</b>
