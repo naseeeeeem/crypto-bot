@@ -2,12 +2,16 @@ import os
 import time
 import json
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-TRADE_CHAT_ID = os.getenv("TRADE_CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")              # قناة التنبيهات / المراقبة
+TRADE_CHAT_ID = os.getenv("TRADE_CHAT_ID")  # قناة التوصيات VIP
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID")
+
+REPORT_TIMEZONE = os.getenv("REPORT_TIMEZONE", "Asia/Hebron")
 
 GATE_BASE = "https://api.gateio.ws/api/v4"
 DATA_FILE = "trades_data.json"
@@ -25,9 +29,14 @@ SUPPORT_LOOKBACK = 30
 WATCH_VOLUME_PERCENT = 55
 EARLY_VOLUME_PERCENT = 80
 VIP_VOLUME_PERCENT = 110
+ULTRA_VIP_VOLUME_PERCENT = 140
 
 MAX_ENTRY_DISTANCE_PERCENT = 1.8
 MAX_WATCH_DISTANCE_PERCENT = 3.5
+ULTRA_MAX_DISTANCE_PERCENT = 1.0
+
+FOMO_MAX_DISTANCE_PERCENT = 1.8
+FOMO_MAX_10M_MOVE = 5.0
 
 MAX_DUMP_10M_PERCENT = -3.5
 MAX_PUMP_10M_PERCENT = 8
@@ -40,6 +49,7 @@ WHALE_VOLUME_DIFF_USDT = 70000
 
 VIP_SCORE = 130
 GOLD_SCORE = 160
+ULTRA_VIP_SCORE = 180
 
 last_alerts = {}
 last_update_id = 0
@@ -99,6 +109,30 @@ def send(msg, symbol=None, chat_id=None):
         print("Telegram error:", e)
 
 
+def send_photo(photo_path, caption="", chat_id=None):
+    if not BOT_TOKEN:
+        return
+
+    target = chat_id if chat_id else REPORT_CHAT_ID
+    if not target:
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+
+    try:
+        with open(photo_path, "rb") as photo:
+            files = {"photo": photo}
+            data = {
+                "chat_id": str(target),
+                "caption": caption,
+                "parse_mode": "HTML"
+            }
+            r = requests.post(url, data=data, files=files, timeout=20)
+            print("Telegram photo:", r.status_code, r.text[:120])
+    except Exception as e:
+        print("send_photo error:", e)
+
+
 def safe_float(x):
     try:
         return float(x)
@@ -150,7 +184,11 @@ def get_symbols():
 
 
 def get_klines(symbol):
-    params = {"currency_pair": symbol, "interval": "1m", "limit": 120}
+    params = {
+        "currency_pair": symbol,
+        "interval": "1m",
+        "limit": 120
+    }
 
     try:
         return requests.get(
@@ -208,6 +246,8 @@ def whale_text(a):
 
 
 def vip_label(a):
+    if a["score"] >= ULTRA_VIP_SCORE:
+        return "🚀 ULTRA VIP"
     if a["score"] >= GOLD_SCORE:
         return "💎 GOLD VIP"
     if a["score"] >= VIP_SCORE:
@@ -257,6 +297,20 @@ def trade_plan(a):
     }
 
 
+def confidence_percent(a):
+    plan = trade_plan(a)
+
+    score_part = min(a["score"] / 200 * 40, 40)
+    volume_part = min(a["p30"] / 180 * 25, 25)
+    distance_part = max(0, 20 - (plan["distance"] * 10))
+    whale_part = 10 if a["vol_diff30"] >= WHALE_VOLUME_DIFF_USDT else 0
+    price_part = 5 if 0.2 <= a["price_change_10m"] <= 4 else 0
+
+    confidence = score_part + volume_part + distance_part + whale_part + price_part
+
+    return max(0, min(confidence, 95))
+
+
 def analyze(symbol):
     if is_bad_symbol(symbol):
         return None
@@ -304,6 +358,7 @@ def analyze(symbol):
 
     distance = ((price - support) / support) * 100 if support > 0 else 999
 
+    # فلاتر حماية
     if change10 <= MAX_DUMP_10M_PERCENT:
         return None
 
@@ -313,9 +368,11 @@ def analyze(symbol):
     if change30 >= MAX_PRICE_30M_PERCENT:
         return None
 
+    # Fake Pump Filter
     if p30 >= FAKE_PUMP_VOLUME_PERCENT and abs(change10) <= FAKE_PUMP_MAX_PRICE_MOVE:
         return None
 
+    # لا نريد عملات بعيدة جدًا عن الدعم
     if distance > MAX_WATCH_DISTANCE_PERCENT:
         return None
 
@@ -358,6 +415,33 @@ def analyze(symbol):
 def get_alert_type(a):
     plan = trade_plan(a)
 
+    # 🚫 FOMO Filter
+    if (
+        plan["distance"] > FOMO_MAX_DISTANCE_PERCENT
+        or a["price_change_10m"] > FOMO_MAX_10M_MOVE
+    ):
+        if (
+            a["p30"] >= WATCH_VOLUME_PERCENT
+            and a["vol_diff30"] > 0
+            and a["score"] >= 80
+            and plan["distance"] <= MAX_WATCH_DISTANCE_PERCENT
+        ):
+            return "watch"
+
+        return None
+
+    # 🚀 Ultra VIP
+    if (
+        a["score"] >= ULTRA_VIP_SCORE
+        and a["p30"] >= ULTRA_VIP_VOLUME_PERCENT
+        and a["price_change_10m"] >= 0.4
+        and a["price_change_10m"] <= 4.5
+        and plan["distance"] <= ULTRA_MAX_DISTANCE_PERCENT
+        and a["vol_diff30"] >= WHALE_VOLUME_DIFF_USDT
+    ):
+        return "ultra_vip"
+
+    # 💎 GOLD VIP
     if (
         a["score"] >= GOLD_SCORE
         and a["p30"] >= VIP_VOLUME_PERCENT
@@ -366,6 +450,7 @@ def get_alert_type(a):
     ):
         return "gold_vip"
 
+    # 🔥 VIP
     if (
         a["score"] >= VIP_SCORE
         and a["p30"] >= VIP_VOLUME_PERCENT
@@ -374,6 +459,7 @@ def get_alert_type(a):
     ):
         return "vip_trade"
 
+    # 👀 Early VIP
     if (
         a["p30"] >= EARLY_VOLUME_PERCENT
         and -0.2 <= a["price_change_10m"] <= 1.2
@@ -383,6 +469,7 @@ def get_alert_type(a):
     ):
         return "early_vip"
 
+    # 📊 Watch
     if (
         a["p30"] >= WATCH_VOLUME_PERCENT
         and a["vol_diff30"] > 0
@@ -394,7 +481,7 @@ def get_alert_type(a):
 
 
 def register_trade(a, alert_type):
-    if alert_type not in ["gold_vip", "vip_trade", "early_vip"]:
+    if alert_type not in ["ultra_vip", "gold_vip", "vip_trade", "early_vip"]:
         return
 
     plan = trade_plan(a)
@@ -412,6 +499,7 @@ def register_trade(a, alert_type):
         "target1": plan["target1"],
         "target2": plan["target2"],
         "score": a["score"],
+        "confidence": confidence_percent(a),
         "opened_at": int(time.time()),
         "status": "active"
     }
@@ -447,7 +535,8 @@ def check_trades_results():
 
 🎯 Target 1: <b>${trade['target1']:.6f}</b>
 💰 السعر الحالي: <b>${price:.6f}</b>
-🧠 Score: <b>{trade['score']:.2f}</b>""",
+🧠 Score: <b>{trade['score']:.2f}</b>
+🎯 Confidence: <b>{trade.get('confidence', 0):.1f}%</b>""",
                 symbol,
                 REPORT_CHAT_ID or TRADE_CHAT_ID
             )
@@ -464,7 +553,8 @@ def check_trades_results():
 
 🛑 Stop: <b>${trade['stop_loss']:.6f}</b>
 💰 السعر الحالي: <b>${price:.6f}</b>
-🧠 Score: <b>{trade['score']:.2f}</b>""",
+🧠 Score: <b>{trade['score']:.2f}</b>
+🎯 Confidence: <b>{trade.get('confidence', 0):.1f}%</b>""",
                 symbol,
                 REPORT_CHAT_ID or TRADE_CHAT_ID
             )
@@ -475,6 +565,52 @@ def check_trades_results():
     data["active"] = still_active
     data["closed"] = closed
     save_data(data)
+
+
+def best_trading_time_text():
+    data = load_data()
+    closed = data.get("closed", [])
+
+    if not closed:
+        return "🧠 لا يوجد بيانات كافية لتحليل أفضل وقت تداول."
+
+    tz = ZoneInfo(REPORT_TIMEZONE)
+    hours = {}
+
+    for t in closed:
+        opened_at = t.get("opened_at")
+        if not opened_at:
+            continue
+
+        hour = datetime.fromtimestamp(opened_at, tz).hour
+
+        if hour not in hours:
+            hours[hour] = {"total": 0, "wins": 0}
+
+        hours[hour]["total"] += 1
+
+        if t.get("status") == "win":
+            hours[hour]["wins"] += 1
+
+    valid = []
+
+    for hour, s in hours.items():
+        if s["total"] >= 2:
+            win_rate = (s["wins"] / s["total"]) * 100
+            valid.append((win_rate, s["total"], hour, s["wins"]))
+
+    if not valid:
+        return "🧠 لا يوجد صفقات كافية بعد لتحديد أفضل وقت تداول."
+
+    valid.sort(reverse=True)
+    best = valid[0]
+
+    return f"""🧠 <b>أفضل وقت تداول حتى الآن</b>
+
+⏰ الساعة الأفضل: <b>{best[2]:02d}:00</b> بتوقيت {REPORT_TIMEZONE}
+✅ نجاح: <b>{best[3]}</b>
+📊 عدد الصفقات: <b>{best[1]}</b>
+📈 Win Rate: <b>{best[0]:.1f}%</b>"""
 
 
 def build_report():
@@ -510,6 +646,8 @@ def build_report():
     if not type_lines:
         type_lines = "\nلا يوجد نتائج مغلقة بعد."
 
+    best_time = best_trading_time_text()
+
     return f"""📊 <b>تقرير أداء البوت VIP</b>
 
 📌 الصفقات المغلقة: <b>{total}</b>
@@ -521,7 +659,58 @@ def build_report():
 
 📂 <b>حسب نوع الإشارة:</b>{type_lines}
 
-🕒 التقرير يدوي عبر أمر /report"""
+{best_time}
+
+🕒 الأوامر:
+/report
+/chart
+/besttime"""
+
+
+def create_performance_chart():
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print("matplotlib not available:", e)
+        return None
+
+    data = load_data()
+    closed = data.get("closed", [])
+
+    if not closed:
+        return None
+
+    wins = 0
+    losses = 0
+    labels = []
+    values = []
+
+    for i, t in enumerate(closed, start=1):
+        if t.get("status") == "win":
+            wins += 1
+        elif t.get("status") == "loss":
+            losses += 1
+
+        total = wins + losses
+        win_rate = (wins / total * 100) if total else 0
+
+        labels.append(i)
+        values.append(win_rate)
+
+    path = "/tmp/performance_chart.png"
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(labels, values, marker="o")
+    plt.title("VIP Bot Win Rate Performance")
+    plt.xlabel("Closed Trades")
+    plt.ylabel("Win Rate %")
+    plt.ylim(0, 100)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+    return path
 
 
 def check_report_command():
@@ -559,16 +748,40 @@ def check_report_command():
             print("Command received:", text)
 
             if text == "/report" or text.startswith("/report@"):
-                print("REPORT REQUEST RECEIVED")
-
                 report = build_report()
 
-                # إرسال التقرير إلى قناة التقارير
                 if REPORT_CHAT_ID:
                     send(report, chat_id=REPORT_CHAT_ID)
 
-                # إرسال نسخة لك في محادثة البوت أيضًا
-                send(report, chat_id=chat_id)
+                send("✅ تم إرسال التقرير إلى قناة التقارير", chat_id=chat_id)
+
+            elif text == "/chart" or text.startswith("/chart@"):
+                chart = create_performance_chart()
+
+                if chart:
+                    send_photo(
+                        chart,
+                        caption="📈 <b>رسم بياني لأداء Win Rate</b>",
+                        chat_id=REPORT_CHAT_ID or chat_id
+                    )
+                    send("✅ تم إرسال الرسم البياني إلى قناة التقارير", chat_id=chat_id)
+                else:
+                    send("لا يوجد بيانات كافية للرسم البياني بعد.", chat_id=chat_id)
+
+            elif text == "/besttime" or text.startswith("/besttime@"):
+                send(best_trading_time_text(), chat_id=REPORT_CHAT_ID or chat_id)
+                send("✅ تم إرسال تحليل أفضل وقت تداول", chat_id=chat_id)
+
+            elif text == "/help" or text.startswith("/help@"):
+                send(
+                    """🤖 <b>أوامر البوت</b>
+
+/report - إرسال تقرير الأداء
+/chart - إرسال الرسم البياني
+/besttime - تحليل أفضل وقت تداول
+/help - عرض الأوامر""",
+                    chat_id=chat_id
+                )
 
     except Exception as e:
         print("Report command error:", e)
@@ -597,6 +810,7 @@ def vip_message(a, title):
 {whale}
 
 🧠 VIP Smart Score: <b>{a['score']:.2f}</b>
+🎯 Confidence: <b>{confidence_percent(a):.1f}%</b>
 
 🎯 <b>خطة VIP</b>
 🟢 Entry: <b>${plan['entry']:.6f}</b>
@@ -635,6 +849,7 @@ def watch_message(a):
 {whale}
 
 🧠 Score: <b>{a['score']:.2f}</b>
+🎯 Confidence: <b>{confidence_percent(a):.1f}%</b>
 
 👀 <b>منطقة مراقبة</b>
 🟢 دخول أفضل قرب: <b>${plan['entry']:.6f}</b>
@@ -662,7 +877,7 @@ def process_symbol(symbol):
 
 symbols = get_symbols()
 print(f"Loaded Gate symbols: {len(symbols)}")
-print("VIP BOT + REPORT SYSTEM RUNNING ✅")
+print("VIP BOT + REPORT + ULTRA + FOMO + CONFIDENCE RUNNING ✅")
 
 while True:
     try:
@@ -695,7 +910,11 @@ while True:
                 f"Score: {score:.2f} | p30: {a['p30']:.2f}%"
             )
 
-            if alert_type == "gold_vip":
+            if alert_type == "ultra_vip":
+                send(vip_message(a, "🚀🔥 <b>ULTRA VIP TRADE</b>"), symbol, TRADE_CHAT_ID)
+                register_trade(a, alert_type)
+
+            elif alert_type == "gold_vip":
                 send(vip_message(a, "💎🔥 <b>GOLD VIP TRADE</b>"), symbol, TRADE_CHAT_ID)
                 register_trade(a, alert_type)
 
