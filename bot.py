@@ -26,7 +26,7 @@ MIN_VOLUME_30M_USDT = 40000
 
 SUPPORT_LOOKBACK = 30
 
-WATCH_VOLUME_PERCENT = 55
+WATCH_VOLUME_PERCENT = 40
 EARLY_VOLUME_PERCENT = 80
 VIP_VOLUME_PERCENT = 110
 ULTRA_VIP_VOLUME_PERCENT = 140
@@ -469,13 +469,11 @@ def get_alert_type(a):
     ):
         return "early_vip"
 
-    # 📊 Watch
-    if (
-        a["p30"] >= WATCH_VOLUME_PERCENT
-        and a["vol_diff30"] > 0
-        and a["score"] >= 80
-    ):
-        return "watch"
+if (
+    a["p30"] >= WATCH_VOLUME_PERCENT
+    and a["vol_diff30"] > 0
+):
+    return "watch"
 
     return None
 
@@ -985,8 +983,7 @@ def analyze(symbol):
     if p30 >= FAKE_PUMP_VOLUME_PERCENT and abs(change10) <= FAKE_PUMP_MAX_PRICE_MOVE:
         return None
 
-    if distance_4h_entry > MAX_WATCH_DISTANCE_PERCENT:
-        return None
+
 
     if levels_4h["rr"] < 0.9:
         return None
