@@ -469,11 +469,11 @@ def get_alert_type(a):
     ):
         return "early_vip"
 
-if (
+    if (
     a["p30"] >= WATCH_VOLUME_PERCENT
     and a["vol_diff30"] > 0
 ):
-    return "watch"
+        return "watch"
 
     return None
 
