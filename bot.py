@@ -509,6 +509,7 @@ def register_trade(a, alert_type):
 
 
 def check_trades_results():
+    def check_trades_results():
     data = load_data()
     active = data.get("active", [])
     closed = data.get("closed", [])
@@ -523,44 +524,39 @@ def check_trades_results():
             still_active.append(trade)
             continue
 
-        if price >= trade["target1"]:
-            trade["status"] = "win"
-            trade["closed_at"] = int(time.time())
-            trade["closed_price"] = price
-            closed.append(trade)
+        tp1_hit = trade.get("tp1_hit", False)
 
-            send(
-                f"""✅ <b>صفقة وصلت Target 1</b>
-<b>{trade['pair']}</b>
-
-🎯 Target 1: <b>${trade['target1']:.6f}</b>
-💰 السعر الحالي: <b>${price:.6f}</b>
-🧠 Score: <b>{trade['score']:.2f}</b>
-🎯 Confidence: <b>{trade.get('confidence', 0):.1f}%</b>""",
-                symbol,
-                REPORT_CHAT_ID or TRADE_CHAT_ID
-            )
-
-        elif price <= trade["stop_loss"]:
+        # 🛑 Stop Loss
+        if price <= trade["stop_loss"]:
             trade["status"] = "loss"
             trade["closed_at"] = int(time.time())
             trade["closed_price"] = price
             closed.append(trade)
 
-            send(
-                f"""🛑 <b>صفقة ضربت Stop Loss</b>
-<b>{trade['pair']}</b>
+            send(f"🛑 SL HIT {trade['pair']} | {price}", symbol, REPORT_CHAT_ID or TRADE_CHAT_ID)
+            continue
 
-🛑 Stop: <b>${trade['stop_loss']:.6f}</b>
-💰 السعر الحالي: <b>${price:.6f}</b>
-🧠 Score: <b>{trade['score']:.2f}</b>
-🎯 Confidence: <b>{trade.get('confidence', 0):.1f}%</b>""",
-                symbol,
-                REPORT_CHAT_ID or TRADE_CHAT_ID
-            )
+        # 🎯 TP1
+        if not tp1_hit and price >= trade["target1"]:
+            trade["tp1_hit"] = True
 
-        else:
+            send(f"🎯 TP1 HIT {trade['pair']} | {price}", symbol, REPORT_CHAT_ID or TRADE_CHAT_ID)
+
             still_active.append(trade)
+            continue
+
+        # 🚀 TP2
+        if price >= trade["target2"]:
+            trade["status"] = "win"
+            trade["closed_at"] = int(time.time())
+            trade["closed_price"] = price
+            trade["tp2_hit"] = True
+            closed.append(trade)
+
+            send(f"🚀 TP2 HIT {trade['pair']} | {price}", symbol, REPORT_CHAT_ID or TRADE_CHAT_ID)
+            continue
+
+        still_active.append(trade)
 
     data["active"] = still_active
     data["closed"] = closed
